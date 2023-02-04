@@ -1,353 +1,462 @@
-'''
-Python and PyGame A* algorithm demonstration.
-Path finding along a Hexagon tesselation.
+import abc
+import itertools
+import logging
+import math
+import pygame
+import sys
 
-Version 1.0.0
-
-Python Version: 3.2.3
-Pygame Version: 1.9
-
-Click a Start point,
-Click an End point.
-Additional Hexagon clicks will create 'barriers' that the algorithm will have to work around.
-'Enter' triggers the algorithm.
-'Backspace' afterwards will reset the program.
-'exit' or click the 'x' to terminate.
-
-The distance function is straightforward: Euclidean 2-space distance. 
-Might need to change this.
-
-Possible future improvements:
-    * Modifying the distance function?
-    * Click-and-drag to create maze?
-'''
-
-import random, pygame, sys, math
 from pygame.locals import *
 
-#Window dimensions.
-WINDOWWIDTH = 1080
-WINDOWHEIGHT = 720
 
-#Set the display
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(message)s', datefmt='%H:%M')
+
+# initialise pygame
+pygame.init()
+# Set the display
+pygame.display.set_caption('A*.')
+display_info = pygame.display.Info()
+WINDOWWIDTH = int(display_info.current_w * 4/5)
+WINDOWHEIGHT = int(display_info.current_h * 4/5)
 DISPLAYSURF = pygame.display.set_mode((WINDOWWIDTH, WINDOWHEIGHT))
 
-#RGB colour chart.
-#                R,   G,   B.
-WHITE       = (255, 255, 255)
-BLACK       = (  0,   0,   0)
-RED         = (255,   0,   0)
-GREEN       = (  0, 255,   0)
-BLUE        = (  0,   0, 255)
-YELLOW      = (255, 255,   0)
-DARKGREEN   = (  0, 155,   0)
-DARKGRAY    = ( 40,  40,  40)
-
-#Create a clock object and set the Frames Per Second.
+# Create a clock object and set the Frames Per Second.
 FPS = 30
 FPSCLOCK = pygame.time.Clock()
 
-#This prevents the Optimisation function from entering an infinite recursion
-OptList = []
+# RGB colour chart.
+WHITE = (200, 200, 200)
+BLACK = (0, 0, 0)
+RED = (255, 0, 0)
+GREEN = (0, 255, 0)
+BLUE = (0, 0, 255)
+YELLOW = (255, 255, 0)
+DARKGREEN = (0, 155, 0)
+DARKGRAY = (40, 40, 40)
 
-#Booleans. And other things.
-SetStart = True
-startid = -1
-SetEnd = True
-endid = -1
-RunAlg = False
-currentNode = -1
+# The pixel length of the Hexagon sides.
+HEX_SIDE_LENGTH = 25
+# The length of a perpendicular line from a Hexagon's flat edge to its center..
+APOTHEM = int(HEX_SIDE_LENGTH * ((math.sqrt(3)) / 2))
+# The size of the font will be based on the size of the Hexagons.
+FONT = pygame.font.SysFont("Arial", HEX_SIDE_LENGTH // 2)
 
-def ReInitialise():
-    global SetStart, startid, SetEnd, endid, RunAlg, currentNode, HexagonList
-    SetStart = True
-    startid = -1
-    SetEnd = True
-    endid = -1
-    RunAlg = False
-    currentNode = -1
-    HexagonList = []
-    SetHexagons()
+# Some global state control booleans.
+GLOBALS = {
+    "RunAlg": False,
+    "isFinished": False,
+    "StartHex": None,
+    "EndHex": None,
+    "CurrentHex": None,
+}
 
-def main():
-    global HexagonList, SideLength, RunAlg
-    #Create a list for 'Hexagon objects'. Dictionaries which hold the details for all the hexagons.
-    HexagonList = []
-    # initialise audio
-    pygame.mixer.pre_init(22050, -16, 2, 512)
-    #initialise pygame
-    pygame.init()
-    pygame.display.set_caption('A*.')
-    #Hexagon sidelength.
-    SideLength = 20
 
-    #Fills the HexagonList
-    SetHexagons()
+class Node(abc.ABC):
+    """The Abstract properties and functions for a node in an A* environment."""
+    def __init__(self):
+        # A list of adjacent nodes
+        self.neighbours = []
+        # The adjacent node with the shortest distance from the starting point.
+        self.parent = None
 
-    while True:
-        #Set the background colour to black.
-        DISPLAYSURF.fill(BLACK)
+        # Is the node non-traversable.
+        self.is_barrier = False
+        # Is this the start node.
+        self.is_start = False
+        # Is this the destination node.
+        self.is_end = False
 
-        #Tessellate the screen with Hexagons.
-        PrintHexagons()
+        # Is this node part of the chosen path.
+        self.is_path = False
 
-       #Runs computation.
-        if RunAlg:
-            Astar()
+        # Is this node part of the Open/to-be-evaluated set.
+        self.open = False
+        # Has this node already been visited.
+        self.closed = False
 
-        #Allows user to continue tweaking their maze.
-        else:
-            checkInput()
+    @property
+    def neighbour_distance(self) -> int:
+        """The cost of moving between two nodes, for calculating a node's g value."""
+        raise NotImplementedError
 
-        #Clear screen and delay if screen is refreshing too fast.
-        pygame.display.update()
-        FPSCLOCK.tick(FPS)
+    @property
+    def g(self) -> int:
+        """The cost of getting from the start node to this node."""
+        if self.is_start:
+            return 0
+        elif self.parent is not None:
+            return self.parent.g + self.neighbour_distance
 
-def SetHexagons():
-    ident = 0
-    #Every even row needs to be indented, rowNum will act as a tracker for this purpose.
-    rowNum=1
-    #y-coordinate, for loop to scroll down the y-axis.
-    y=0
-    while y <= WINDOWHEIGHT:
-        #x-coordinate, for loop to scroll along the x-axis.
-        if rowNum%2 == 0:
-            x = 0
-        else:
-            x = SideLength*((math.sqrt(3))/2)
+        # Return infinity by default (which is unfortunately a float.)
+        return math.inf
 
-        while x <= WINDOWWIDTH:
-            #A frustrating variable.
-            derp = SideLength*((math.sqrt(3))/2)
-            #Hexagon vertices in Euclidean 2-space
-            a=(x, y-SideLength)
-            b=(x+derp, y-SideLength/2)
-            c=(x+derp, y+SideLength/2)
-            d=(x, y+SideLength)
-            e=(x-derp, y+SideLength/2)
-            f=(x-derp, y-SideLength/2)
-            #Make a list of the points
-            plist = [a,b,c,d,e,f]
-            #details necessary to print a hexagon.
-            hexagon = {'colour':WHITE, 'PointList':plist, 'cx': x, 'cy': y, 't':1, 'IsBarrier': False, 'IsStart': False, 'IsEnd': False, 'IsVisited':False, 'Open': False, 'Closed':False, 'id': ident, 'neighbours': [], 'Parentid': -1, 'childid':-1, 'h':-1, 'g':-1, 'f':-1}
-            #h = estimated distance to finish.
-            #g = cost of getting to node.
-            #f = g+h
-            HexagonList.append(hexagon)
-            ident+=1
-            x+=2*derp
-        rowNum+=1    
-        y+=(3*SideLength)/2
+    @property
+    def h(self) -> int:
+        """The estimated cost to the end node."""
+        return -1
 
-def PrintHexagons():
-    #I love how Python does this for lists and for loops.
-    for hexagon in HexagonList:
-        pygame.draw.polygon(DISPLAYSURF,hexagon['colour'],hexagon['PointList'], hexagon['t'])
+    @property
+    def f(self) -> int:
+        """f = g + h"""
+        return self.h + self.g
 
-def EuclideanDistance(x,y,a,b):
-    #Two coordinates (x,y) and (a,b).
-    #Junior Certificate Level mathematics.
-    dist = math.sqrt((x-a)**2+(y-b)**2)
-    return dist
+    def evaluate_neighbours(self):
+        """Update g values for all relevant neighbours."""
+        for neighbour in self.neighbours:
+            # Skip neighbours that cannot be traversed.
+            if not neighbour.is_barrier:
+                # Skip this node's parent.
+                if neighbour != self.parent:
+                    # If the cost of getting to the neighbour node is shorter from this node...
+                    if neighbour.g > self.g + self.neighbour_distance:
+                        # Make this node the neighbours parent.
+                        neighbour.parent = self
+                        # Add the node to the Open set if it has not already been visited.
+                        if not neighbour.closed:
+                            neighbour.open = True
 
-def FindHex(p):
-    global SetStart, SetEnd, startid, endid
-    #Coordinates (a,b) for the recent mouseclick.
-    #c is the shortest distance between the mouseclick and a hexagon centrepoint.
-    #BestHex is the id for the closest hexagon to the mouseclick.
-    a,b,c,BestHex=p[0],p[1],100,0
-    for hexagon in HexagonList:
-        #Distance between mousclick and current hexagon being examined.
-        dist = EuclideanDistance(a,b, hexagon['cx'], hexagon['cy'])
-        #Keeps BestHex up to date if a closer hexagon is found.
-        if c>dist:
-            c=dist
-            BestHex = hexagon['id']
-    #BestHex should now correspond to the clicked Hexagon. It must be found again.
-    hexagon = HexagonList[BestHex]
-    if not(RunAlg):
-        #If the start has not been set, clicked hexagon is now the start hexagon.
-        if SetStart and not hexagon['IsBarrier']:
-            hexagon['IsStart'] = True
-            hexagon['colour'] = GREEN
-            hexagon['t']=0
-            startid = hexagon['id']
-            SetStart = False
-            #If the end has not been set...
-        elif SetEnd:
-            #The hexagon is probably the start, and is being deselected.
-            if hexagon['IsStart'] and not hexagon['IsBarrier']:
-                hexagon['IsStart'] = False
-                hexagon['colour'] = WHITE
-                hexagon['t'] = 1
-                SetStart = True
-            #Or else probably the end is being set.
-            elif not hexagon['IsBarrier']:
-                hexagon['IsEnd'] = True
-                hexagon['colour'] = RED
-                hexagon['t']=0
-                endid = hexagon['id']
-                SetEnd = False
-        #Every other case.
-        else:
-            #Clicking start or end a second time deselects them.
-            if hexagon['IsStart']:
-                hexagon['IsStart'] = False
-                hexagon['colour'] = WHITE
-                hexagon['t'] = 1
-                SetStart = True
-            elif hexagon['IsEnd']:
-                hexagon['IsEnd'] = False
-                hexagon['colour'] = WHITE
-                hexagon['t'] = 1
-                SetEnd = True
-            #Otherwise they become a barrier hexagon, or are desellected as a barrier hexagon.
-            elif hexagon['IsBarrier']:
-                hexagon['IsBarrier'] = False
-                hexagon['colour'] = WHITE
-                hexagon['t'] = 1
+
+class NodeList:
+    """The Abstract properties and functions for the list of nodes in an A* environment."""
+    def __init__(self):
+        self.nodes = []
+
+    def __iter__(self) -> Node:
+        for node in self.nodes:
+            yield node
+
+    def a_star(self) -> bool:
+        """The A8 algorithm itself.
+
+        :returns: True if the end node was discovered on this iteration.
+        """
+        # Get the set of Open nodes.
+        open_nodes = [node for node in self if node.open]
+        # Get all nodes with the current lowest F value.
+        lowest_f_value = sorted(open_nodes, key=lambda node: node.f)[0].f
+        lowest_f_value_nodes = [node for node in open_nodes if node.f == lowest_f_value]
+
+        for current_node in lowest_f_value_nodes:
+            logger.debug(f"{current_node=}")
+            # Close the node upon visiting it.
+            current_node.open = False
+            current_node.closed = True
+
+            if current_node.is_end:
+                # If the node under scrutiny is the end node, we have succeeded.
+                # Mark path back to start and end the process.
+                logger.info("End Hexagon Located!")
+                current_node.is_path = True
+                next_node = current_node.parent
+                while not next_node.is_start:
+                    next_node.is_path = True
+                    next_node = next_node.parent
+                return True
             else:
-                hexagon['IsBarrier'] = True
-                hexagon['colour'] = DARKGRAY
-                hexagon['t'] = 0
+                # Otherwise, evaluate the neighbouring nodes.
+                current_node.evaluate_neighbours()
+        return False
 
-def SetupAlg():
-    global HexagonList, SideLength, startid, endid, currentNode
 
-    for hex1 in HexagonList:
-        neighbourlist = []
-        a,b = hex1['cx'], hex1['cy']
-        hex1['h'] = EuclideanDistance(a,b, HexagonList[endid]['cx'], HexagonList[endid]['cy'])
+class PyGameTile(Node, abc.ABC):
+    """Abstract class for A* nodes as Polygons in PyGame."""
+    @property
+    @abc.abstractmethod
+    def point_list(self):
+        """The list of points making up this Polygon."""
+        pass
 
-        for hex2 in HexagonList:
-            c,d = hex2['cx'], hex2['cy']
-            dist = EuclideanDistance(a,b,c,d)
+    @property
+    @abc.abstractmethod
+    def width(self):
+        """The width property of the polygon, to determine if the Polygon should be filled, or be an outline."""
+        return 1
 
-            if dist <= 2*SideLength and dist >0 and not(hex2['IsBarrier']) and not(hex2['IsStart']):
-                neighbourlist.append(hex2['id'])
+    @property
+    @abc.abstractmethod
+    def colour(self):
+        """The colour of the Polygon."""
+        return WHITE
 
-        hex1['neighbours'] = neighbourlist
+    def draw(self):
+        """Draw the Polygon to the screen."""
+        pygame.draw.polygon(DISPLAYSURF, self.colour, self.point_list, self.width)
+        # For debugging, I wanted to see each node's f value. Seemed worth keeping in.
+        DISPLAYSURF.blit(FONT.render(str(self.f), True, BLACK), self.point_list[0])
 
-    currentNode = startid
-    HexagonList[endid]['h']=0
-    HexagonList[startid]['g']=0
 
-def checkInput():
-    global RunAlg
+class Hexagon(PyGameTile):
+    """The chosen Polygon was a Hexagon, because it tessellates nicely, and the math was challenging."""
+    def __init__(self, x, y):
+        super(Hexagon, self).__init__()
+        self.x = x
+        self.y = y
+
+    def __str__(self):
+        return f"{self.x}, {self.y}"
+
+    @property
+    def neighbour_distance(self):
+        return APOTHEM * 2
+
+    @property
+    def h(self):
+        h = 0
+        if GLOBALS["EndHex"]:
+            x = GLOBALS["EndHex"].x
+            y = GLOBALS["EndHex"].y
+            h = euclidean_distance(self.x, self.y, x, y)
+        return int(h)
+
+    @property
+    def point_list(self):
+        a = (self.x - APOTHEM, self.y - int(HEX_SIDE_LENGTH / 2))
+        b = (self.x, self.y - HEX_SIDE_LENGTH)
+        c = (self.x + APOTHEM, self.y - int(HEX_SIDE_LENGTH / 2))
+        d = (self.x + APOTHEM, self.y + int(HEX_SIDE_LENGTH / 2))
+        e = (self.x, self.y + HEX_SIDE_LENGTH)
+        f = (self.x - APOTHEM, self.y + int(HEX_SIDE_LENGTH / 2))
+        return [a, b, c, d, e, f]
+
+    @property
+    def width(self):
+        if any([self.is_start, self.is_end, self.is_barrier, self.open, self.closed, self.is_path]):
+            return 0
+        else:
+            return 1
+
+    @property
+    def colour(self):
+        if self.is_start:
+            return GREEN
+        elif self.is_end:
+            return RED
+        elif self.is_barrier:
+            return DARKGRAY
+        elif self.is_path:
+            return WHITE
+        elif self.open:
+            return YELLOW
+        elif self.closed:
+            return BLUE
+        else:
+            return DARKGREEN
+
+    def click(self):
+        """Make adjustments to the Hexagon and GLOBAL properties when this Hexagon is clicked."""
+        # If the start has not been set, clicked hexagon is now the start hexagon.
+        if not GLOBALS["StartHex"] and not self.is_barrier:
+            self.is_start = True
+            self.open = True
+            GLOBALS["StartHex"] = self
+            GLOBALS["CurrentHex"] = self
+            # If the end has not been set...
+        # If the start has been set, but the end has not been set...
+        elif not GLOBALS["EndHex"]:
+            # If this Hexagon is the start, and is being deselected.
+            if self.is_start:
+                self.is_start = False
+                self.open = False
+                GLOBALS["StartHex"] = None
+            # Otherwise, it is being set as the End.
+            else:
+                self.is_end = True
+                GLOBALS["EndHex"] = self
+        # Otherwise, if the start and end hexagons have been set.
+        else:
+            # Clicking start or end a second time deselects them.
+            if self.is_start:
+                self.is_start = False
+                GLOBALS["StartHex"] = None
+            elif self.is_end:
+                self.is_end = False
+                GLOBALS["EndHex"] = None
+            # Otherwise they become a barrier hexagon, or are deselected as a barrier hexagon.
+            elif self.is_barrier:
+                self.is_barrier = False
+            else:
+                self.is_barrier = True
+
+
+class HexagonList(NodeList):
+    def __init__(self):
+        super(HexagonList, self).__init__()
+        self.set_start = True
+        self.start_hexid = -1
+        self.set_end = True
+        self.end_hexid = -1
+
+        self.current_hexid = -1
+        self.set_hexagons()
+
+    def __getitem__(self, item):
+        return self.nodes[item]
+
+    def __len__(self):
+        return len(self.nodes)
+
+    def __iter__(self):
+        for row in self.nodes:
+            for node in row:
+                yield node
+
+    def set_hexagons(self):
+        """Create the Hexagons to fill this list."""
+        y = 0
+        row_num = 0
+        while y <= (WINDOWHEIGHT + HEX_SIDE_LENGTH):
+            self.nodes.append([])
+
+            # x-coordinate, for loop to scroll along the x-axis.
+            x = APOTHEM * (row_num % 2)
+            col_num = 0
+            while x <= (WINDOWWIDTH + HEX_SIDE_LENGTH):
+                logger.info(f"({row_num=}, {col_num=}): ({x=}, {y=})")
+                self.nodes[row_num].append(Hexagon(x, y))
+                x += 2 * APOTHEM
+                col_num += 1
+            row_num += 1
+            y += int(HEX_SIDE_LENGTH * (3 / 2))
+
+        for row_num in range(0, len(self.nodes)):
+            hexagon_row = self.nodes[row_num]
+            for col_num in range(0, len(hexagon_row)):
+                hexagon = hexagon_row[col_num]
+                neighbourlist = []
+                neighbour_hexagons = find_hexagons(row_num, col_num, self)
+                for neighbour_hex in neighbour_hexagons:
+                    x2, y2 = neighbour_hex.x, neighbour_hex.y
+                    dist = euclidean_distance(hexagon.x, hexagon.y, x2, y2)
+                    if 0 < dist <= 2 * HEX_SIDE_LENGTH:
+                        neighbourlist.append(neighbour_hex)
+                hexagon.neighbours = neighbourlist
+
+    def reset(self):
+        """Reset the object."""
+        self.set_start = True
+        self.start_hexid = -1
+        self.set_end = True
+        self.end_hexid = -1
+
+        self.nodes = []
+        self.current_hexid = -1
+        GLOBALS["StartHex"] = None
+        GLOBALS["EndHex"] = None
+        self.set_hexagons()
+
+    def draw(self):
+        """Draw all the Hexagons in this list."""
+        for hexagon_row in self.nodes:
+            for hexagon in hexagon_row:
+                hexagon.draw()
+
+
+def euclidean_distance(x1: int, y1: int, x2: int, y2: int) -> float:
+    """Distance between two coordinates (x1,y1) and (x2,y2)."""
+    distance = math.sqrt((x1-x2)**2+(y1-y2)**2)
+    return distance
+
+
+def check_input(hexagon_list: HexagonList):
+    """Monitor user input and react accordingly."""
     for event in pygame.event.get():
-        #Exit if x is clicked.
+        # Exit if x is clicked.
         if event.type == QUIT:
             terminate()
 
-        #Gets a mouseclick and coordinates.
-        if event.type==pygame.MOUSEBUTTONDOWN:
+        # Gets a mouseclick and coordinates.
+        if event.type == pygame.MOUSEBUTTONDOWN:
             position = pygame.mouse.get_pos()
-            FindHex(position)
+            if not GLOBALS["RunAlg"] and not GLOBALS["isFinished"]:
+                hexagon = find_clicked_hex(position, hexagon_list)
+                hexagon.click()
 
-        if event.type==KEYDOWN:
-            #Enter triggers the pathfinding.
-            if event.key == K_RETURN and not SetStart and not SetEnd:
-                RunAlg = True
-                SetupAlg()
+        if event.type == KEYDOWN:
+            # Enter triggers the pathfinding.
+            if event.key == K_RETURN and GLOBALS["StartHex"] and GLOBALS["EndHex"] and not GLOBALS["RunAlg"]:
+                logger.warning("Running Algorithm")
+                GLOBALS["RunAlg"] = True
 
-            if event.key == K_BACKSPACE and not RunAlg:
-                ReInitialise()
+            if event.key == K_BACKSPACE and not GLOBALS["RunAlg"]:
+                logger.warning("Restarting")
+                hexagon_list.reset()
+                GLOBALS["isFinished"] = False
 
-            #Sets escape to end game.
+            # Sets escape to end game.
             if event.key == K_ESCAPE:
                 terminate()
 
+
+def find_clicked_hex(p: tuple, hexagon_list: HexagonList) -> Hexagon:
+    """Given a coordinate p, find the Hexagon that was clicked."""
+    x, y = p[0], p[1]
+    row_num = y // int(HEX_SIDE_LENGTH * (3 / 2))
+    col_num = (x + (APOTHEM * ((row_num + 1) % 2))) // (APOTHEM * 2)
+    logger.warning(f"{p=}")
+
+    best_hex = None
+    c = max(WINDOWHEIGHT, WINDOWWIDTH)
+    hexagons = find_hexagons(row_num, col_num, hexagon_list)
+
+    for hexagon in hexagons:
+        # Distance between mousclick and current hexagon being examined.
+        dist = euclidean_distance(x, y, hexagon.x, hexagon.y)
+        # Keeps BestHex up to date if a closer hexagon is found.
+        if c > dist:
+            c = dist
+            best_hex = hexagon
+
+    return best_hex
+
+
+def find_hexagons(row_num: int, col_num: int, hexagon_list: HexagonList) -> list:
+    """Return a list of the 9 Hexagons objects adjacent to a provided coordinate set.
+
+    :param row_num:
+    :param col_num:
+    :param hexagon_list:
+    :return: list of hexagons.
+    """
+    return_list = []
+    for row_number, col_number in itertools.product([row_num, row_num+1, row_num-1], [col_num, col_num+1, col_num-1]):
+        try:
+            hexagon = hexagon_list[row_number][col_number]
+            return_list.append(hexagon)
+        except IndexError:
+            pass
+    return return_list
+
+
 def terminate():
+    """Terminate the program."""
     pygame.quit()
     sys.exit()
 
-def Astar():
-    global HexagonList, currentNode, RunAlg, OptList
-    #Stupidly large number.
-    smallestf = 10000
-    derp = 10000
-    #Variable to hold the id for the next node.
-    sfid=0
-    #Current Node.
-    cur = HexagonList[currentNode]
-    #Cost of getting to current node.
-    cost = cur['g']+1
 
-    #Node is now no longer part of the open set.
-    cur['Open'] = False
-    cur['Closed'] = True
-    #Redundant?
-    cur['IsVisited'] = True
-    if not cur['IsStart']:
-        cur['colour'] = BLUE
+def main():
+    """My handling of the pygame display loop was based on a Space Invaders example.
+    In a future update, I'd like to try splitting the screen refresh, input monitoring, and HexagonList into separate
+    threads.
+    """
+    # Fills the HexagonList
+    hexagon_list = HexagonList()
 
-    #Look at the surrounding nodes.
-    for hexid in cur['neighbours']:
+    while True:
+        # Clear screen and delay if screen is refreshing too fast.
+        pygame.display.update()
+        FPSCLOCK.tick(FPS)
+        # Set the background colour to black.
+        DISPLAYSURF.fill(BLACK)
+        # Tessellate the screen with Hexagons.
+        hexagon_list.draw()
 
-        #If the node under scrutiny is the end node, we have succeded. Mark path back to start and end.
-        if hexid == endid:
-            HexagonList[currentNode]['colour']=WHITE
-            nextid = HexagonList[currentNode]['Parentid']
-            while nextid != startid:
-                HexagonList[nextid]['colour'] = WHITE
-                cid = nextid
-                nextid = HexagonList[cid]['Parentid']
+        if GLOBALS["RunAlg"]:
+            if hexagon_list.a_star():
+                GLOBALS["RunAlg"] = False
+                GLOBALS["isFinished"] = True
 
-            RunAlg = False
-            return
+        check_input(hexagon_list)
 
-        #Otherwise mark the nodes being examined.
-        else:
-            #Every newly inspected node is "Open". Has a h value, and is assigned an f value based on parent. Becomes child to closest parent.
-            #Every examined node is "Closed". Has a g and a h value, with corresponding f.
-            #An open node may re-evaluate a closed node, and re-evaluate the f's for its children.
-            if not HexagonList[hexid]['IsVisited']:
-                HexagonList[hexid]['Open'] = True
-                HexagonList[hexid]['colour'] = YELLOW
-                HexagonList[hexid]['t'] = 0
-                HexagonList[hexid]['IsVisited'] = True
-                HexagonList[hexid]['Parentid'] = currentNode
-                HexagonList[hexid]['g'] = cost
-                HexagonList[hexid]['f']= HexagonList[hexid]['h']+HexagonList[hexid]['g']
-
-            #If the examined node has been previously visited, this gets more complex.
-            if HexagonList[hexid]['IsVisited']:
-                #Node has been visited and expanded past, so we need to check if the new path to this node is better.
-                if HexagonList[hexid]['g'] > cost:
-                    #It is better. Recalculate g and f.
-                    HexagonList[hexid]['g'] = cost
-                    HexagonList[hexid]['f'] = HexagonList[hexid]['g']+HexagonList[hexid]['h']
-                    HexagonList[hexid]['Parentid'] = currentNode
-
-                    #Now fix the g values around this node.
-                    OptList = [-1]
-                    Optimise(hexid)
-
-            #Keep track of the hexagon with the lowest f value. This will be the child node our current.
-            if HexagonList[hexid]['f'] < smallestf:
-                smallestf = HexagonList[hexid]['f']
-                sfid = hexid
-
-    #After examining all the neighbours, assign the closest as the childnode.
-    HexagonList[currentNode]['childid'] = sfid
-    #Now choose the Open node with the lowest f value as the new current node.
-    for hexagon in HexagonList:
-        if hexagon['f'] < derp and hexagon['Open']:
-            derp = hexagon['f']
-            currentNode = hexagon['id']
-
-#If a node's g value has been changed, all nodes who stem from this node must be re-evaluated.
-def Optimise(ident):
-    global HexagonList, OptList
-    #Prevents this node being visited again during this cycle.
-    OptList.append(ident)
-    #Check all the surrounding hexagons
-    for hexid in HexagonList[ident]['neighbours']:
-        if HexagonList[hexid]['Parentid'] == ident and not hexid in OptList:
-            HexagonList[hexid]['g'] = HexagonList[ident]['g']+1
-            HexagonList[hexid]['f'] = HexagonList[hexid]['g']+HexagonList[hexid]['h']
-            #Recursive step to fix the children of this node.
-            Optimise(hexid)
 
 if __name__ == '__main__':
     main()
